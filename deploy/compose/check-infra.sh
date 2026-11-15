@@ -15,7 +15,7 @@ bad()  { printf 'FAIL %s\n' "$1"; fail=1; }
 check() { local name=$1; shift; if "$@" >/dev/null 2>&1; then pass "$name"; else bad "$name"; fi; }
 check_not() { local name=$1; shift; if "$@" >/dev/null 2>&1; then bad "$name"; else pass "$name"; fi; }
 
-# shellcheck disable=SC2329 # called through check/check_not
+# shellcheck disable=SC2317,SC2329 # called through check/check_not
 psql_as() { # <user> <password> <db> <sql>
   dc exec -T -e PGPASSWORD="$2" postgres psql -h 127.0.0.1 -U "$1" -d "$3" -tAc "$4"
 }
