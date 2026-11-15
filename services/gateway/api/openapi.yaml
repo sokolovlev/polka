@@ -1,0 +1,2059 @@
+openapi: 3.1.0
+info:
+  title: Polka public API
+  version: 0.1.0
+  summary: REST/JSON API of the Polka gateway (spec 6.5).
+  description: |
+    Base path `/api/v1`. Money is `{"amount_minor": 129900, "currency": "RUB"}`,
+    timestamps are RFC 3339. Lists use cursor pagination: `?page_size=&page_token=`,
+    the response carries `next_page_token` (empty on the last page).
+
+    Errors are RFC 9457 `application/problem+json` with a machine-readable `code`.
+
+    Access levels (`x-access` on every operation):
+    - `public` — no token;
+    - `authenticated` — any valid access token;
+    - `verified` — access token with `email_verified = true`;
+    - `owner` — authenticated, and only the caller's own resources (others answer 404);
+    - `seller` — role seller; `seller-owner` — seller and owner of the resource;
+    - `admin` — role admin.
+
+    Ownership is enforced again in the owning service, not only in the gateway (spec 8.3).
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+    description: Registration, login, tokens, email verification, password reset.
+  - name: catalog
+    description: Categories, product cards, search and shops (public).
+  - name: cart
+    description: Buyer's cart.
+  - name: orders
+    description: Checkout, buyer's orders and real-time status.
+  - name: seller
+    description: "Seller cabinet: shop, products, stock, sub-orders, balance."
+  - name: admin
+    description: Categories, blocking, fake payment provider settings.
+  - name: service
+    description: Health, version and the payment provider webhook.
+
+paths:
+  # ------------------------------------------------------------------ auth
+  /auth/register:
+    post:
+      tags: [auth]
+      operationId: register
+      summary: Register with email and password; sends a verification email.
+      x-access: public
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "201":
+          description: Registered. The user is not logged in yet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409":
+          description: Email already registered (`EMAIL_TAKEN`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Log in. Access token in the body, refresh token in an httpOnly cookie.
+      x-access: public
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Logged in.
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/RefreshCookie" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refresh
+      summary: Rotate the refresh token and issue a new access token.
+      description: Reuse of an already rotated refresh token revokes the whole token family.
+      x-access: refresh-cookie
+      security:
+        - refreshCookie: []
+      responses:
+        "200":
+          description: New tokens.
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/RefreshCookie" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Revoke the refresh token and the current access token.
+      x-access: authenticated
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Logged out; the refresh cookie is cleared.
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/RefreshCookie" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/verify-email:
+    post:
+      tags: [auth]
+      operationId: verifyEmail
+      summary: Confirm the email with the token from the letter.
+      x-access: public
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+      responses:
+        "204": { description: Email verified. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409":
+          description: Token invalid, expired or already used (`TOKEN_INVALID`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /auth/verify-email/resend:
+    post:
+      tags: [auth]
+      operationId: resendVerification
+      summary: Send the verification email again, at most once a minute.
+      x-access: authenticated
+      security:
+        - bearerAuth: []
+      responses:
+        "202": { description: Email queued. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "409":
+          description: Email already verified (`EMAIL_ALREADY_VERIFIED`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/password-reset:
+    post:
+      tags: [auth]
+      operationId: requestPasswordReset
+      summary: Request a password reset link.
+      description: Always 202, whether the email exists or not (FR-B1b).
+      x-access: public
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordResetRequest" }
+      responses:
+        "202": { description: Accepted. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/password-reset/confirm:
+    post:
+      tags: [auth]
+      operationId: confirmPasswordReset
+      summary: Set a new password with the token from the letter; revokes all refresh tokens.
+      x-access: public
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordResetConfirmRequest" }
+      responses:
+        "204": { description: Password changed. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409":
+          description: Token invalid, expired or already used (`TOKEN_INVALID`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: Current user profile, roles and email status.
+      x-access: authenticated
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  # --------------------------------------------------------------- catalog
+  /categories:
+    get:
+      tags: [catalog]
+      operationId: listCategories
+      summary: Category tree.
+      x-access: public
+      security: []
+      responses:
+        "200":
+          description: Top-level categories with nested children.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/CategoryNode" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /products/{id}:
+    get:
+      tags: [catalog]
+      operationId: getProduct
+      summary: Product card with variants and availability (catalog + inventory).
+      x-access: public
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      responses:
+        "200":
+          description: Product card.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductCard" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /search:
+    get:
+      tags: [catalog]
+      operationId: search
+      summary: Full-text search with filters, facets and sorting (FR-B3).
+      description: |
+        Filters by variant options use one query parameter per axis: `opt.<axis>=<value>`,
+        e.g. `opt.Размер=M&opt.Цвет=синий`; repeat a parameter for several values of one axis.
+        Option and price filters apply to a single variant (nested query, spec 7.3).
+      x-access: public
+      security: []
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 200 } }
+        - name: category
+          in: query
+          description: Category id; matches the category and its descendants.
+          schema: { type: string, format: uuid }
+        - {
+            name: price_min,
+            in: query,
+            description: Minor units.,
+            schema: { type: integer, format: int64, minimum: 0 },
+          }
+        - {
+            name: price_max,
+            in: query,
+            description: Minor units.,
+            schema: { type: integer, format: int64, minimum: 0 },
+          }
+        - { name: shop, in: query, description: Shop id., schema: { type: string, format: uuid } }
+        - { name: in_stock, in: query, schema: { type: boolean } }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [relevance, price_asc, price_desc, newest]
+            default: relevance
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: One card per product, plus facets with counts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /search/suggest:
+    get:
+      tags: [catalog]
+      operationId: suggest
+      summary: Autocomplete, up to 10 suggestions.
+      x-access: public
+      security: []
+      parameters:
+        - {
+            name: q,
+            in: query,
+            required: true,
+            schema: { type: string, minLength: 1, maxLength: 100 },
+          }
+      responses:
+        "200":
+          description: Suggestions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 10
+                    items: { $ref: "#/components/schemas/Suggestion" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /shops/{slug}:
+    get:
+      tags: [catalog]
+      operationId: getShop
+      summary: Public shop page (its products come from /search?shop=).
+      x-access: public
+      security: []
+      parameters:
+        - { name: slug, in: path, required: true, schema: { $ref: "#/components/schemas/Slug" } }
+      responses:
+        "200":
+          description: Shop.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Shop" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ------------------------------------------------------------------ cart
+  /cart:
+    get:
+      tags: [cart]
+      operationId: getCart
+      summary: Cart grouped by shop, with current prices and warnings.
+      x-access: authenticated
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Cart.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    delete:
+      tags: [cart]
+      operationId: clearCart
+      summary: Empty the cart.
+      x-access: authenticated
+      security:
+        - bearerAuth: []
+      responses:
+        "204": { description: Cart cleared. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /cart/items/{sku_id}:
+    put:
+      tags: [cart]
+      operationId: setCartItem
+      summary: Set the quantity of a variant; 0 removes it.
+      x-access: authenticated
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SkuId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QuantityRequest" }
+      responses:
+        "200":
+          description: Updated cart.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------- orders
+  /orders:
+    post:
+      tags: [orders]
+      operationId: checkout
+      summary: Place an order from the cart; the saga continues asynchronously.
+      description: |
+        Idempotent by `Idempotency-Key`: a repeat returns the order already created.
+        The response is immediate with status PENDING; further status changes arrive
+        over WebSocket (/ws) and in `GET /orders/{id}`.
+      x-access: verified
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckoutRequest" }
+      responses:
+        "202":
+          description: Order created, status PENDING.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Email not verified (`EMAIL_NOT_VERIFIED`); the cart is kept.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "409":
+          description: Cart is empty (`CART_EMPTY`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    get:
+      tags: [orders]
+      operationId: listMyOrders
+      summary: My orders, newest first.
+      x-access: authenticated
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Orders.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/OrderSummary" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /orders/{id}:
+    get:
+      tags: [orders]
+      operationId: getOrder
+      summary: Order with sub-orders and payment link.
+      x-access: owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /orders/{id}/cancel:
+    post:
+      tags: [orders]
+      operationId: cancelOrder
+      summary: Cancel before payment only.
+      x-access: owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "202":
+          description: Cancellation accepted; the reserve is released by the saga.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderSummary" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Already paid or finished (`ORDER_NOT_CANCELLABLE`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /ws:
+    get:
+      tags: [orders]
+      operationId: websocket
+      summary: WebSocket for real-time order status (FR-B6).
+      description: |
+        Upgrade to WebSocket. The first client message must be
+        `{"type": "auth", "token": "<access token>"}`; the server closes the connection
+        if it does not arrive or is invalid. Server messages are
+        `{"type": "order.status", "order_id": "...", "status": "...", "payment_url": "..."}`.
+        Proxied by the gateway to notification.
+      x-access: authenticated
+      security: []
+      responses:
+        "101": { description: Switching protocols. }
+        "400": { description: Not a WebSocket upgrade request. }
+
+  # ---------------------------------------------------------------- seller
+  /seller/shop:
+    post:
+      tags: [seller]
+      operationId: createShop
+      summary: Create my shop (one per account); grants the seller role.
+      x-access: verified
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateShopRequest" }
+      responses:
+        "201":
+          description: Shop created. Refresh the access token to get the seller role.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Shop" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Already has a shop (`SHOP_EXISTS`) or slug taken (`SLUG_TAKEN`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    get:
+      tags: [seller]
+      operationId: getMyShop
+      summary: My shop.
+      x-access: seller
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Shop.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Shop" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      tags: [seller]
+      operationId: updateMyShop
+      summary: Update name or description of my shop.
+      x-access: seller
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateShopRequest" }
+      responses:
+        "200":
+          description: Updated shop.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Shop" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /seller/products:
+    get:
+      tags: [seller]
+      operationId: listMyProducts
+      summary: My products with status and stock, optionally filtered by status.
+      x-access: seller
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/ProductStatus" }
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Products.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/SellerProductSummary" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [seller]
+      operationId: createProduct
+      summary: Create a draft product.
+      x-access: seller
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateProductRequest" }
+      responses:
+        "201":
+          description: Draft created.
+          headers:
+            ETag: { $ref: "#/components/headers/ProductETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerProduct" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /seller/products/{id}:
+    get:
+      tags: [seller]
+      operationId: getMyProduct
+      summary: My product with variants, stock and images.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      responses:
+        "200":
+          description: Product.
+          headers:
+            ETag: { $ref: "#/components/headers/ProductETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerProduct" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [seller]
+      operationId: updateMyProduct
+      summary: Update product fields with optimistic locking.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProductRequest" }
+      responses:
+        "200":
+          description: Updated product; version incremented.
+          headers:
+            ETag: { $ref: "#/components/headers/ProductETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerProduct" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/VersionMismatch" }
+
+  /seller/products/{id}/publish:
+    post:
+      tags: [seller]
+      operationId: publishProduct
+      summary: draft or archived → active; needs at least one variant.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      responses:
+        "200":
+          description: Product is active.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerProduct" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: No variants (`PRODUCT_HAS_NO_VARIANTS`) or blocked (`PRODUCT_BLOCKED`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /seller/products/{id}/archive:
+    post:
+      tags: [seller]
+      operationId: archiveProduct
+      summary: active → archived.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      responses:
+        "200":
+          description: Product is archived.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerProduct" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Transition not allowed (`INVALID_STATUS_TRANSITION`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /seller/products/{id}/variants/{sku_id}:
+    put:
+      tags: [seller]
+      operationId: upsertVariant
+      summary: Create or update a variant (SKU code, option values, price).
+      description: The client generates `sku_id` (UUIDv7), so a retried PUT is idempotent.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+        - $ref: "#/components/parameters/SkuId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertVariantRequest" }
+      responses:
+        "200":
+          description: Variant updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerVariant" }
+        "201":
+          description: Variant created; its stock row starts at 0.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerVariant" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            Duplicate option combination or SKU code (`VARIANT_EXISTS`), or the product
+            already has 50 variants (`VARIANT_LIMIT`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    delete:
+      tags: [seller]
+      operationId: deleteVariant
+      summary: Delete a variant without active reservations.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+        - $ref: "#/components/parameters/SkuId"
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The variant has active reservations (`VARIANT_RESERVED`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /seller/stock/{sku_id}:
+    put:
+      tags: [seller]
+      operationId: setStock
+      summary: Set the stock quantity of my variant.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SkuId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QuantityRequest" }
+      responses:
+        "200":
+          description: Stock.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stock" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Less than currently reserved (`STOCK_BELOW_RESERVED`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /seller/products/{id}/images/upload-url:
+    post:
+      tags: [seller]
+      operationId: createUploadUrl
+      summary: Get a presigned PUT URL for a product photo (JPEG/PNG/WebP, up to 5 MB).
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UploadUrlRequest" }
+      responses:
+        "201":
+          description: Upload slot created; PUT the file to `upload_url` with exactly `headers`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadUrlResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The product already has 10 photos (`IMAGE_LIMIT`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /seller/products/{id}/images/{image_id}/confirm:
+    post:
+      tags: [seller]
+      operationId: confirmUpload
+      summary: Confirm an uploaded photo; thumbnails are made in the background.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+        - $ref: "#/components/parameters/ImageId"
+      responses:
+        "202":
+          description: Accepted; status becomes `ready` when thumbnails exist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductImage" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Object not uploaded or does not match the slot (`UPLOAD_NOT_FOUND`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /seller/products/{id}/images/order:
+    put:
+      tags: [seller]
+      operationId: reorderImages
+      summary: Set the order of photos.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [image_ids]
+              properties:
+                image_ids:
+                  description: All image ids of the product, in display order.
+                  type: array
+                  maxItems: 10
+                  uniqueItems: true
+                  items: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Images in the new order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/ProductImage" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /seller/products/{id}/images/{image_id}:
+    delete:
+      tags: [seller]
+      operationId: deleteImage
+      summary: Delete a photo.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+        - $ref: "#/components/parameters/ImageId"
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /seller/orders:
+    get:
+      tags: [seller]
+      operationId: listSellerSubOrders
+      summary: My sub-orders, optionally filtered by status.
+      x-access: seller
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/SubOrderStatus" }
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Sub-orders.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/SellerSubOrder" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /seller/orders/{sub_order_id}/status:
+    post:
+      tags: [seller]
+      operationId: updateSubOrderStatus
+      summary: Move my sub-order forward to shipped or delivered.
+      x-access: seller-owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sub_order_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  description: Forward transitions only (R24).
+                  type: string
+                  enum: [SHIPPED, DELIVERED]
+      responses:
+        "200":
+          description: Updated sub-order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerSubOrder" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Not a forward transition (`INVALID_STATUS_TRANSITION`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /seller/balance:
+    get:
+      tags: [seller]
+      operationId: getSellerBalance
+      summary: Pending and available balance of my shop.
+      x-access: seller
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Balance.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerBalance" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /seller/balance/entries:
+    get:
+      tags: [seller]
+      operationId: listLedgerEntries
+      summary: Ledger history of my shop's accounts, newest first.
+      x-access: seller
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Entries.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/LedgerEntry" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /seller/stats:
+    get:
+      tags: [seller]
+      operationId: getSellerStats
+      summary: Revenue and number of orders for a period (FR-S7).
+      x-access: seller
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - {
+            name: to,
+            in: query,
+            required: true,
+            description: Inclusive.,
+            schema: { type: string, format: date },
+          }
+      responses:
+        "200":
+          description: Stats.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SellerStats" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ----------------------------------------------------------------- admin
+  /admin/categories/{id}:
+    put:
+      tags: [admin]
+      operationId: upsertCategory
+      summary: Create or update a category.
+      x-access: admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertCategoryRequest" }
+      responses:
+        "200":
+          description: Category updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Category" }
+        "201":
+          description: Category created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Category" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Path already exists (`CATEGORY_EXISTS`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /admin/products/{id}/block:
+    post:
+      tags: [admin]
+      operationId: blockProduct
+      summary: Block a product; it leaves search within 5 s.
+      x-access: admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProductId"
+      responses:
+        "204": { description: Blocked. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/users/{id}/block:
+    post:
+      tags: [admin]
+      operationId: blockUser
+      summary: Block a user; their tokens stop working immediately.
+      x-access: admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Blocked. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/payment-mock/settings:
+    get:
+      tags: [admin]
+      operationId: getPaymentMockSettings
+      summary: Fake provider behaviour (FR-A3).
+      x-access: admin
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentMockSettings" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [admin]
+      operationId: setPaymentMockSettings
+      summary: Change failure rate, delay, webhook loss and duplication.
+      x-access: admin
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentMockSettings" }
+      responses:
+        "200":
+          description: New settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentMockSettings" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # --------------------------------------------------------------- service
+  /webhooks/payments:
+    post:
+      tags: [service]
+      operationId: paymentWebhook
+      summary: Provider webhook, proxied to payment.
+      description: |
+        Signed with HMAC-SHA256 over `<timestamp>.<body>`; requests older than 5 minutes
+        are rejected (spec 8.3).
+      x-access: hmac
+      security: []
+      parameters:
+        - { name: X-Signature, in: header, required: true, schema: { type: string } }
+        - {
+            name: X-Timestamp,
+            in: header,
+            required: true,
+            description: Unix seconds.,
+            schema: { type: integer, format: int64 },
+          }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentWebhook" }
+      responses:
+        "204": { description: Accepted (also for duplicates). }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401":
+          description: Bad or stale signature (`SIGNATURE_INVALID`).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /healthz:
+    servers: [{ url: / }]
+    get:
+      tags: [service]
+      operationId: healthz
+      summary: Liveness (the process answers; dependencies are not checked).
+      x-access: public
+      security: []
+      responses:
+        "200":
+          description: Alive.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthStatus" }
+
+  /readyz:
+    servers: [{ url: / }]
+    get:
+      tags: [service]
+      operationId: readyz
+      summary: Readiness (dependencies answer and the gateway is not shutting down).
+      x-access: public
+      security: []
+      responses:
+        "200":
+          description: Ready.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthStatus" }
+        "503":
+          description: Not ready or draining.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthStatus" }
+
+  /version:
+    servers: [{ url: / }]
+    get:
+      tags: [service]
+      operationId: version
+      summary: Build version and commit.
+      x-access: public
+      security: []
+      responses:
+        "200":
+          description: Build info.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuildInfo" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access JWT (EdDSA, 15 min) with claims `sub`, `roles`, `email_verified`, `jti`.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: Opaque refresh token; `HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth`.
+
+  headers:
+    RefreshCookie:
+      description: "`refresh_token=<opaque>; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=2592000`"
+      schema: { type: string }
+    ProductETag:
+      description: Product version, for `If-Match` on the next PATCH.
+      schema: { type: string, examples: ['"7"'] }
+    RetryAfter:
+      description: Seconds to wait.
+      schema: { type: integer }
+
+  parameters:
+    ProductId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SkuId:
+      name: sku_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ImageId:
+      name: image_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: The product version from the last ETag.
+      schema: { type: string }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    PageToken:
+      name: page_token
+      in: query
+      description: Opaque cursor from `next_page_token`.
+      schema: { type: string, maxLength: 512 }
+
+  responses:
+    ValidationFailed:
+      description: Invalid request (`VALIDATION_FAILED`), with the list of fields in `errors`.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unauthenticated:
+      description: No token, invalid or expired (`UNAUTHENTICATED`, `TOKEN_EXPIRED`).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: No permission (`FORBIDDEN`, `EMAIL_NOT_VERIFIED`, `USER_BLOCKED`).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: Not found, also for other users' resources (`NOT_FOUND`).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    VersionMismatch:
+      description: Stale `If-Match` version (`VERSION_MISMATCH`).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    RateLimited:
+      description: Rate limit exceeded (`RATE_LIMITED`).
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unavailable:
+      description: Downstream service unavailable, circuit breaker open (`UNAVAILABLE`).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    # ------------------------------------------------------------- common
+    Money:
+      type: object
+      required: [amount_minor, currency]
+      properties:
+        amount_minor:
+          description: Integer minor units (kopecks). Never a float.
+          type: integer
+          format: int64
+          examples: [129900]
+        currency:
+          type: string
+          enum: [RUB]
+      additionalProperties: false
+    Page:
+      type: object
+      required: [next_page_token]
+      properties:
+        next_page_token:
+          description: Empty string on the last page.
+          type: string
+    Problem:
+      description: RFC 9457 Problem Details with a machine-readable code.
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri-reference, default: about:blank }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        code:
+          type: string
+          examples: [VALIDATION_FAILED, EMAIL_NOT_VERIFIED, OUT_OF_STOCK, ORDER_NOT_CANCELLABLE]
+        errors:
+          description: Field errors, for `VALIDATION_FAILED`.
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string, examples: [delivery_address] }
+              message: { type: string }
+    Slug:
+      type: string
+      pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+      minLength: 3
+      maxLength: 50
+    Email:
+      type: string
+      format: email
+      maxLength: 254
+    Password:
+      description: At least 8 characters, not in the list of the most common passwords.
+      type: string
+      minLength: 8
+      maxLength: 128
+    OptionValues:
+      description: 'Value per option axis, e.g. `{"Размер": "M", "Цвет": "синий"}`.'
+      type: object
+      maxProperties: 2
+      additionalProperties: { type: string, minLength: 1, maxLength: 50 }
+
+    # --------------------------------------------------------------- auth
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+        password: { $ref: "#/components/schemas/Password" }
+      additionalProperties: false
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+        password: { type: string, minLength: 1, maxLength: 128 }
+      additionalProperties: false
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, const: Bearer }
+        expires_in: { description: Seconds., type: integer, examples: [900] }
+    TokenRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, minLength: 1, maxLength: 128 }
+      additionalProperties: false
+    PasswordResetRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { $ref: "#/components/schemas/Email" }
+      additionalProperties: false
+    PasswordResetConfirmRequest:
+      type: object
+      required: [token, new_password]
+      properties:
+        token: { type: string, minLength: 1, maxLength: 128 }
+        new_password: { $ref: "#/components/schemas/Password" }
+      additionalProperties: false
+    Role:
+      type: string
+      enum: [buyer, seller, admin]
+    User:
+      type: object
+      required: [id, email, email_verified, roles, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { $ref: "#/components/schemas/Email" }
+        email_verified: { type: boolean }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/Role" }
+        created_at: { type: string, format: date-time }
+
+    # ------------------------------------------------------------ catalog
+    Category:
+      type: object
+      required: [id, path, name]
+      properties:
+        id: { type: string, format: uuid }
+        path:
+          description: ltree path of slugs from the root, e.g. `clothes.men.shirts`.
+          type: string
+        name: { type: string }
+        parent_id: { type: [string, "null"], format: uuid }
+    CategoryNode:
+      allOf:
+        - $ref: "#/components/schemas/Category"
+        - type: object
+          required: [children]
+          properties:
+            children:
+              type: array
+              items: { $ref: "#/components/schemas/CategoryNode" }
+    UpsertCategoryRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        slug:
+          description: Last label of the ltree path.
+          type: string
+          pattern: "^[a-z0-9_]+$"
+          maxLength: 50
+        parent_id: { type: [string, "null"], format: uuid }
+      additionalProperties: false
+    ShopRef:
+      type: object
+      required: [id, slug, name]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { $ref: "#/components/schemas/Slug" }
+        name: { type: string }
+    Shop:
+      allOf:
+        - $ref: "#/components/schemas/ShopRef"
+        - type: object
+          required: [description]
+          properties:
+            description: { type: string }
+    CreateShopRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        slug: { $ref: "#/components/schemas/Slug" }
+        description: { type: string, maxLength: 2000, default: "" }
+      additionalProperties: false
+    UpdateShopRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, maxLength: 2000 }
+      additionalProperties: false
+    ProductStatus:
+      type: string
+      enum: [draft, active, archived, blocked]
+    ProductImage:
+      type: object
+      required: [id, position, status]
+      properties:
+        id: { type: string, format: uuid }
+        position: { type: integer, minimum: 0 }
+        status:
+          type: string
+          enum: [uploading, ready, failed]
+        thumb_200_url: { type: [string, "null"], format: uri }
+        thumb_800_url: { type: [string, "null"], format: uri }
+    Variant:
+      type: object
+      required: [sku_id, options, price]
+      properties:
+        sku_id: { type: string, format: uuid }
+        options: { $ref: "#/components/schemas/OptionValues" }
+        price: { $ref: "#/components/schemas/Money" }
+    PublicVariant:
+      allOf:
+        - $ref: "#/components/schemas/Variant"
+        - type: object
+          required: [available]
+          properties:
+            available:
+              description: Quantity minus reserved. Null if inventory did not answer in time.
+              type: [integer, "null"]
+              minimum: 0
+    ProductCard:
+      type: object
+      required:
+        [id, shop, category_id, title, description, attributes, option_axes, images, variants]
+      properties:
+        id: { type: string, format: uuid }
+        shop: { $ref: "#/components/schemas/ShopRef" }
+        category_id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        attributes:
+          description: Attributes common to all variants (JSONB).
+          type: object
+        option_axes:
+          type: array
+          maxItems: 2
+          items: { type: string }
+        images:
+          type: array
+          items: { $ref: "#/components/schemas/ProductImage" }
+        variants:
+          type: array
+          items: { $ref: "#/components/schemas/PublicVariant" }
+    SearchHit:
+      type: object
+      required: [product_id, title, price_min, in_stock, shop]
+      properties:
+        product_id: { type: string, format: uuid }
+        title: { type: string }
+        title_highlighted:
+          description: Title with matches wrapped in `<em>`; only with `q`.
+          type: string
+        price_min:
+          description: Lowest variant price, shown as «от …».
+          $ref: "#/components/schemas/Money"
+        price_max: { $ref: "#/components/schemas/Money" }
+        in_stock: { type: boolean }
+        image_url: { type: [string, "null"], format: uri }
+        shop: { $ref: "#/components/schemas/ShopRef" }
+    FacetValue:
+      type: object
+      required: [value, count]
+      properties:
+        value: { type: string }
+        count: { type: integer, minimum: 0 }
+    SearchResponse:
+      allOf:
+        - $ref: "#/components/schemas/Page"
+        - type: object
+          required: [items, total, facets]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/SearchHit" }
+            total: { type: integer, minimum: 0 }
+            facets:
+              type: object
+              required: [categories, shops, options, price]
+              properties:
+                categories:
+                  description: Values are category ids.
+                  type: array
+                  items: { $ref: "#/components/schemas/FacetValue" }
+                shops:
+                  description: Values are shop ids.
+                  type: array
+                  items: { $ref: "#/components/schemas/FacetValue" }
+                options:
+                  type: array
+                  items:
+                    type: object
+                    required: [axis, values]
+                    properties:
+                      axis: { type: string }
+                      values:
+                        type: array
+                        items: { $ref: "#/components/schemas/FacetValue" }
+                price:
+                  type: object
+                  required: [min, max]
+                  properties:
+                    min: { $ref: "#/components/schemas/Money" }
+                    max: { $ref: "#/components/schemas/Money" }
+                in_stock: { type: integer, minimum: 0 }
+    Suggestion:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        product_id: { type: [string, "null"], format: uuid }
+
+    # --------------------------------------------------------------- cart
+    QuantityRequest:
+      type: object
+      required: [quantity]
+      properties:
+        quantity: { type: integer, minimum: 0, maximum: 10000 }
+      additionalProperties: false
+    CartWarning:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          enum: [PRICE_CHANGED, NOT_ENOUGH_STOCK, UNAVAILABLE]
+        previous_price: { $ref: "#/components/schemas/Money" }
+        available: { type: integer, minimum: 0 }
+    CartItem:
+      type: object
+      required: [sku_id, product_id, title, options, quantity, price, subtotal, warnings]
+      properties:
+        sku_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        title: { type: string }
+        options: { $ref: "#/components/schemas/OptionValues" }
+        image_url: { type: [string, "null"], format: uri }
+        quantity: { type: integer, minimum: 1 }
+        price: { $ref: "#/components/schemas/Money" }
+        subtotal: { $ref: "#/components/schemas/Money" }
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/CartWarning" }
+    Cart:
+      type: object
+      required: [groups, total]
+      properties:
+        groups:
+          description: Items grouped by shop; each group becomes a sub-order.
+          type: array
+          items:
+            type: object
+            required: [shop, items, subtotal]
+            properties:
+              shop: { $ref: "#/components/schemas/ShopRef" }
+              items:
+                type: array
+                items: { $ref: "#/components/schemas/CartItem" }
+              subtotal: { $ref: "#/components/schemas/Money" }
+        total: { $ref: "#/components/schemas/Money" }
+
+    # ------------------------------------------------------------- orders
+    OrderStatus:
+      type: string
+      enum: [PENDING, AWAITING_PAYMENT, PAID, CONFIRMED, CANCELLED]
+    CancelReason:
+      type: string
+      enum: [out_of_stock, payment_failed, payment_timeout, cancelled_by_buyer]
+    SubOrderStatus:
+      description: |
+        PENDING until the order is confirmed, then NEW → SHIPPED → DELIVERED;
+        CANCELLED when the order is cancelled before confirmation (R24).
+      type: string
+      enum: [PENDING, NEW, SHIPPED, DELIVERED, CANCELLED]
+    CheckoutRequest:
+      type: object
+      required: [delivery_address]
+      properties:
+        delivery_address:
+          description: One free-text line (spec 10.5).
+          type: string
+          minLength: 1
+          maxLength: 500
+      additionalProperties: false
+    CheckoutResponse:
+      type: object
+      required: [order_id, status, total]
+      properties:
+        order_id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        total: { $ref: "#/components/schemas/Money" }
+        payment_url:
+          description: Set once the payment is created.
+          type: [string, "null"]
+          format: uri
+    OrderSummary:
+      type: object
+      required: [id, status, total, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        cancel_reason:
+          oneOf:
+            - $ref: "#/components/schemas/CancelReason"
+            - type: "null"
+        total: { $ref: "#/components/schemas/Money" }
+        created_at: { type: string, format: date-time }
+    OrderItem:
+      description: Snapshot of the item at checkout time.
+      type: object
+      required: [sku_id, product_id, title, options, price, qty]
+      properties:
+        sku_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        title: { type: string }
+        options: { $ref: "#/components/schemas/OptionValues" }
+        price: { $ref: "#/components/schemas/Money" }
+        qty: { type: integer, minimum: 1 }
+    SubOrder:
+      type: object
+      required: [id, shop, status, total, items]
+      properties:
+        id: { type: string, format: uuid }
+        shop: { $ref: "#/components/schemas/ShopRef" }
+        status: { $ref: "#/components/schemas/SubOrderStatus" }
+        total: { $ref: "#/components/schemas/Money" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OrderItem" }
+    Order:
+      allOf:
+        - $ref: "#/components/schemas/OrderSummary"
+        - type: object
+          required: [delivery_address, sub_orders]
+          properties:
+            delivery_address: { type: string }
+            payment_url: { type: [string, "null"], format: uri }
+            sub_orders:
+              type: array
+              items: { $ref: "#/components/schemas/SubOrder" }
+
+    # ------------------------------------------------------------- seller
+    SellerVariant:
+      allOf:
+        - $ref: "#/components/schemas/Variant"
+        - type: object
+          required: [sku_code]
+          properties:
+            sku_code: { type: string }
+            stock: { $ref: "#/components/schemas/Stock" }
+    SellerProduct:
+      type: object
+      required:
+        [
+          id,
+          category_id,
+          title,
+          description,
+          attributes,
+          option_axes,
+          status,
+          version,
+          images,
+          variants,
+          updated_at,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        category_id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        attributes: { type: object }
+        option_axes:
+          type: array
+          maxItems: 2
+          items: { type: string }
+        status: { $ref: "#/components/schemas/ProductStatus" }
+        version: { type: integer, format: int64 }
+        images:
+          type: array
+          items: { $ref: "#/components/schemas/ProductImage" }
+        variants:
+          type: array
+          maxItems: 50
+          items: { $ref: "#/components/schemas/SellerVariant" }
+        updated_at: { type: string, format: date-time }
+    SellerProductSummary:
+      type: object
+      required: [id, title, status, version, variant_count, available_total, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        status: { $ref: "#/components/schemas/ProductStatus" }
+        version: { type: integer, format: int64 }
+        variant_count: { type: integer, minimum: 0 }
+        available_total:
+          description: Sum of available stock over variants.
+          type: integer
+          minimum: 0
+        updated_at: { type: string, format: date-time }
+    CreateProductRequest:
+      type: object
+      required: [title, description, category_id]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        category_id: { type: string, format: uuid }
+        attributes: { type: object, default: {} }
+        option_axes:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 50 }
+          default: []
+      additionalProperties: false
+    UpdateProductRequest:
+      type: object
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        category_id: { type: string, format: uuid }
+        attributes: { type: object }
+        option_axes:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 50 }
+      additionalProperties: false
+    UpsertVariantRequest:
+      type: object
+      required: [sku_code, options, price]
+      properties:
+        sku_code: { type: string, minLength: 1, maxLength: 64 }
+        options: { $ref: "#/components/schemas/OptionValues" }
+        price: { $ref: "#/components/schemas/Money" }
+      additionalProperties: false
+    Stock:
+      type: object
+      required: [sku_id, quantity, reserved, available]
+      properties:
+        sku_id: { type: string, format: uuid }
+        quantity: { type: integer, minimum: 0 }
+        reserved: { type: integer, minimum: 0 }
+        available: { type: integer, minimum: 0 }
+    UploadUrlRequest:
+      type: object
+      required: [content_type, content_length]
+      properties:
+        content_type:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        content_length:
+          description: Exact size in bytes; signed into the URL.
+          type: integer
+          minimum: 1
+          maximum: 5242880
+      additionalProperties: false
+    UploadUrlResponse:
+      type: object
+      required: [image_id, upload_url, headers, expires_at]
+      properties:
+        image_id: { type: string, format: uuid }
+        upload_url: { type: string, format: uri }
+        headers:
+          description: Headers the PUT must send unchanged (they are part of the signature).
+          type: object
+          additionalProperties: { type: string }
+        expires_at: { type: string, format: date-time }
+    SellerSubOrder:
+      type: object
+      required: [id, order_id, status, total, items, delivery_address, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/SubOrderStatus" }
+        total: { $ref: "#/components/schemas/Money" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OrderItem" }
+        delivery_address: { type: string }
+        created_at: { type: string, format: date-time }
+    SellerBalance:
+      type: object
+      required: [pending, available]
+      properties:
+        pending:
+          description: Paid, sub-order not delivered yet.
+          $ref: "#/components/schemas/Money"
+        available:
+          description: After delivered.
+          $ref: "#/components/schemas/Money"
+    LedgerEntry:
+      type: object
+      required: [id, transaction_id, kind, account, amount, created_at]
+      properties:
+        id: { type: string }
+        transaction_id: { type: string, format: uuid }
+        kind:
+          type: string
+          enum: [order_confirmed, sub_order_delivered, refund, reversal]
+        account:
+          type: string
+          enum: [pending, available]
+        amount:
+          description: Signed change of the account balance.
+          $ref: "#/components/schemas/Money"
+        sub_order_id: { type: [string, "null"], format: uuid }
+        gross:
+          description: Sub-order amount before commission (order_confirmed only).
+          $ref: "#/components/schemas/Money"
+        commission:
+          description: Platform commission withheld (order_confirmed only).
+          $ref: "#/components/schemas/Money"
+        created_at: { type: string, format: date-time }
+    SellerStats:
+      type: object
+      required: [from, to, revenue, orders_count]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        revenue:
+          description: Sum of confirmed sub-orders in the period, before commission.
+          $ref: "#/components/schemas/Money"
+        orders_count: { type: integer, minimum: 0 }
+
+    # -------------------------------------------------------------- admin
+    PaymentMockSettings:
+      type: object
+      required: [failure_rate, delay_ms, webhook_loss_rate, webhook_duplicate_rate]
+      properties:
+        failure_rate:
+          { description: Share of declined payments., type: number, minimum: 0, maximum: 1 }
+        delay_ms:
+          { description: Delay before the webhook., type: integer, minimum: 0, maximum: 60000 }
+        webhook_loss_rate: { type: number, minimum: 0, maximum: 1 }
+        webhook_duplicate_rate: { type: number, minimum: 0, maximum: 1 }
+      additionalProperties: false
+
+    # ------------------------------------------------------------ service
+    PaymentWebhook:
+      type: object
+      required: [provider_payment_id, status, idempotency_key]
+      properties:
+        provider_payment_id: { type: string }
+        idempotency_key: { type: string }
+        status:
+          type: string
+          enum: [succeeded, failed, refunded]
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable, draining]
+        failed:
+          description: Failed checks and their errors.
+          type: object
+          additionalProperties: { type: string }
+    BuildInfo:
+      type: object
+      required: [service, version, commit]
+      properties:
+        service: { type: string }
+        version: { type: string }
+        commit: { type: string }
+        go_version: { type: string }

@@ -1,0 +1,11 @@
+**/src/gen/
+libs/go/
+libs/rust/
+services/*/target/
+target/
+bin/
+docs/spec.md
+package-lock.json
+*.md
+web/.next/
+web/next-env.d.ts

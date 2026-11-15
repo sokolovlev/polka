@@ -1,0 +1,40 @@
+# Code generation for all three languages with local, version-pinned plugins
+# (installed into ../bin by `make tools`, see ADR-0002). Paths are relative to
+# the repo root: run `buf generate proto` from there (or `make gen`).
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/sokolovlev/polka/libs/go/proto
+clean: true
+plugins:
+  # Go: messages + gRPC
+  - local: bin/protoc-gen-go
+    out: libs/go/proto
+    opt: paths=source_relative
+  - local: bin/protoc-gen-go-grpc
+    out: libs/go/proto
+    opt: paths=source_relative
+  # Rust: prost messages, tonic services, and a module tree (src/gen/mod.rs)
+  - local: bin/protoc-gen-prost
+    out: libs/rust/proto/src/gen
+    opt:
+      - enable_type_names
+  - local: bin/protoc-gen-tonic
+    out: libs/rust/proto/src/gen
+  - local: bin/protoc-gen-prost-crate
+    out: libs/rust/proto/src/gen
+    strategy: all
+    opt:
+      - include_file=mod.rs
+      - no_features
+  # TypeScript: messages only (notification consumes Kafka; web uses OpenAPI types)
+  - local: node_modules/.bin/protoc-gen-ts_proto
+    out: libs/ts/proto/src/gen
+    opt:
+      - esModuleInterop=true
+      - forceLong=bigint
+      - outputServices=false
+      - importSuffix=.js
+      - useDate=false

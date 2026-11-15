@@ -1,0 +1,22 @@
+# Licenses allowed for third-party dependencies (R6: only free licenses).
+# Permissive, OSI/FSF-approved, plus data licenses used by browser tooling.
+# Copyleft (MPL-2.0, LGPL-3.0) is allowed: it is free, and these come only
+# as dynamically loaded optional packages of Next.js (sharp/libvips, lightningcss).
+# Checked by `make licenses` (Go: go-licenses, Rust: cargo-deny, npm: script).
+0BSD
+Apache-2.0
+BlueOak-1.0.0
+BSD-2-Clause
+BSD-3-Clause
+BSL-1.0
+CC-BY-4.0
+CC0-1.0
+ISC
+LGPL-3.0-or-later
+LLVM-exception
+MIT
+MPL-2.0
+Python-2.0
+Unicode-3.0
+Unlicense
+Zlib

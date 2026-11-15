@@ -1,0 +1,19 @@
+[package]
+name = "polka-proto"
+description = "Generated protobuf messages (prost) and gRPC stubs (tonic). Do not edit src/gen by hand: run `make gen`."
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+hex = "0.4.3"

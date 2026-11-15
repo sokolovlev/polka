@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+package polka.inventory.v1;
+
+// InventoryService methods are added in the stage that needs them (spec 6.2).
+service InventoryService {}

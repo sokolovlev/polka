@@ -1,0 +1,26 @@
+{
+  "name": "@polka/web",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Polka storefront, seller cabinet and admin (spec 4.1). Stage 0: skeleton only.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "next typegen && tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "next": "15.5.29",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "3.3.7",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint-config-next": "15.5.29"
+  }
+}

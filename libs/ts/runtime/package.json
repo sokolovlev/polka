@@ -1,0 +1,31 @@
+{
+  "name": "@polka/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Shared runtime for TS services: config from env (zod), build info, admin routes, graceful shutdown.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "peerDependencies": {
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "fastify": "5.12.8"
+  }
+}

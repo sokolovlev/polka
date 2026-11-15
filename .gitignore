@@ -1,0 +1,28 @@
+# tools installed by `make tools`
+/bin/
+
+# Go
+*.test
+coverage.out
+
+# Rust
+/target/
+
+# Node
+node_modules/
+.next/
+dist/
+*.tsbuildinfo
+
+# env and secrets
+.env
+.env.*
+!.env.example
+
+# editors and OS
+.idea/
+.vscode/
+.DS_Store
+/.crates.toml
+/.crates2.json
+web/next-env.d.ts

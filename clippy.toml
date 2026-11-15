@@ -1,0 +1,5 @@
+disallowed-methods = [
+  { path = "prost_types::Any::from_msg", reason = "use polka_proto::pack: it sets the type.googleapis.com/ prefix that Go and TS use" },
+]
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

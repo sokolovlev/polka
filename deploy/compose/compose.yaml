@@ -1,0 +1,278 @@
+# Polka for local development and review (spec 9.2).
+#   make up     # infra + apps
+#   make infra  # infra only
+# Profiles: infra (storage, broker, mail), apps (all services and web).
+# obs (Prometheus, Grafana, Jaeger, Loki) is added in stage 4.
+name: polka
+
+x-app: &app
+  profiles: [apps]
+  restart: unless-stopped
+  read_only: true
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+  healthcheck: &app-healthcheck
+    test: ["CMD", "/service", "healthcheck"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+    start_period: 5s
+  environment: &app-env
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-go-build: &go-build
+  context: ../..
+  dockerfile: services/go.Dockerfile
+  args: &build-args
+    VERSION: ${POLKA_VERSION:-dev}
+    COMMIT: ${POLKA_COMMIT:-unknown}
+
+x-rust-build: &rust-build
+  context: ../..
+  dockerfile: services/rust.Dockerfile
+  args: *build-args
+
+services:
+  # ================================================================ infra
+  postgres:
+    profiles: [infra]
+    image: postgres:16.16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POLKA_AUTH_DB_PASSWORD: ${POLKA_AUTH_DB_PASSWORD:?}
+      POLKA_CATALOG_DB_PASSWORD: ${POLKA_CATALOG_DB_PASSWORD:?}
+      POLKA_ORDERS_DB_PASSWORD: ${POLKA_ORDERS_DB_PASSWORD:?}
+      POLKA_INVENTORY_DB_PASSWORD: ${POLKA_INVENTORY_DB_PASSWORD:?}
+      POLKA_PAYMENTS_DB_PASSWORD: ${POLKA_PAYMENTS_DB_PASSWORD:?}
+      POLKA_NOTIFICATIONS_DB_PASSWORD: ${POLKA_NOTIFICATIONS_DB_PASSWORD:?}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init/postgres-init.sh:/docker-entrypoint-initdb.d/10-polka.sh:ro
+    ports: ["127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$$POSTGRES_USER" -d postgres']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  valkey:
+    profiles: [infra]
+    image: valkey/valkey:8.1.11-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports: ["127.0.0.1:6379:6379"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    profiles: [infra]
+    image: apache/kafka:4.4.0
+    restart: unless-stopped
+    environment:
+      # Single KRaft node acting as broker and controller.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: polka-local-kraft-01
+      # One broker: RF=1 and min.insync.replicas=1 (R3).
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Topics are created explicitly by kafka-init, never by a typo in a producer.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports: ["127.0.0.1:9094:9094"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+  kafka-init:
+    profiles: [infra]
+    image: apache/kafka:4.4.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/init/kafka-topics.sh"]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_PARTITIONS: 6
+      KAFKA_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+    volumes:
+      - ./init/kafka-topics.sh:/init/kafka-topics.sh:ro
+    restart: "no"
+
+  elasticsearch:
+    profiles: [infra]
+    # Docker Hub official image (same build as docker.elastic.co). Basic
+    # license, self-managed use is free (R2).
+    image: elasticsearch:8.19.23
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      # Local development only; security is on in Kubernetes (ECK).
+      xpack.security.enabled: "false"
+      xpack.ml.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ports: ["127.0.0.1:9200:9200"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s' >/dev/null",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 15s
+
+  s3:
+    profiles: [infra]
+    # SeaweedFS with its S3 API instead of MinIO (R7, ADR-0003).
+    image: chrislusf/seaweedfs:4.51
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/init/seaweedfs-entrypoint.sh"]
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?}
+    volumes:
+      - s3-data:/data
+      - ./init/seaweedfs-entrypoint.sh:/init/seaweedfs-entrypoint.sh:ro
+    ports: ["127.0.0.1:8333:8333"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  s3-init:
+    profiles: [infra]
+    image: amazon/aws-cli:2.39.3
+    depends_on:
+      s3: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/init/s3-init.sh"]
+    environment:
+      S3_ENDPOINT: http://s3:8333
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?}
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./init/s3-init.sh:/init/s3-init.sh:ro
+    restart: "no"
+
+  mailpit:
+    profiles: [infra]
+    image: axllent/mailpit:v1.33.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8025:8025" # web UI
+      - "127.0.0.1:1025:1025" # SMTP
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ================================================================= apps
+  # Stage 0: services only serve health checks, so they do not depend on
+  # infra yet. Each gains depends_on (service_healthy / completed init) and
+  # its connection settings in the stage that wires the dependency.
+  gateway:
+    <<: *app
+    build: { <<: *go-build, args: { <<: *build-args, SERVICE: gateway } }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-gateway:${POLKA_TAG:-main}
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      <<: *app-env
+      HTTP_ADDR: ":8080"
+
+  auth:
+    <<: *app
+    build: { <<: *go-build, args: { <<: *build-args, SERVICE: auth } }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-auth:${POLKA_TAG:-main}
+
+  catalog:
+    <<: *app
+    build: { <<: *go-build, args: { <<: *build-args, SERVICE: catalog } }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-catalog:${POLKA_TAG:-main}
+
+  search:
+    <<: *app
+    build: { <<: *go-build, args: { <<: *build-args, SERVICE: search } }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-search:${POLKA_TAG:-main}
+
+  order:
+    <<: *app
+    build: { <<: *go-build, args: { <<: *build-args, SERVICE: order } }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-order:${POLKA_TAG:-main}
+
+  inventory:
+    <<: *app
+    build: { <<: *rust-build, args: { <<: *build-args, SERVICE: inventory } }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-inventory:${POLKA_TAG:-main}
+
+  payment:
+    <<: *app
+    build: { <<: *rust-build, args: { <<: *build-args, SERVICE: payment } }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-payment:${POLKA_TAG:-main}
+
+  payment-provider-mock:
+    <<: *app
+    build: { <<: *rust-build, args: { <<: *build-args, SERVICE: payment-provider-mock } }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-payment-provider-mock:${POLKA_TAG:-main}
+    ports: ["127.0.0.1:8090:8080"]
+
+  notification:
+    <<: *app
+    build:
+      context: ../..
+      dockerfile: services/node.Dockerfile
+      args: { <<: *build-args, SERVICE: notification }
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-notification:${POLKA_TAG:-main}
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "/nodejs/bin/node", "service/dist/healthcheck.js"]
+
+  web:
+    <<: *app
+    build:
+      context: ../..
+      dockerfile: web/Dockerfile
+      args: *build-args
+    image: ${POLKA_REGISTRY:-ghcr.io/sokolovlev}/polka-web:${POLKA_TAG:-main}
+    ports: ["127.0.0.1:3000:3000"]
+    # Next.js writes its cache under .next at runtime.
+    tmpfs: ["/app/web/.next/cache"]
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "/nodejs/bin/node", "web/healthcheck.mjs"]
+
+volumes:
+  postgres-data:
+  kafka-data:
+  es-data:
+  s3-data:

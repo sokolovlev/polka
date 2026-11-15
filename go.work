@@ -1,0 +1,10 @@
+go 1.27
+
+use (
+	./libs/go
+	./services/auth
+	./services/catalog
+	./services/gateway
+	./services/order
+	./services/search
+)

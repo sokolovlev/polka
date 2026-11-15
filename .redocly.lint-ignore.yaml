@@ -1,0 +1,10 @@
+# Lint findings accepted on purpose (see `redocly lint --generate-ignore-file`).
+services/gateway/api/openapi.yaml:
+  operation-4xx-response:
+    # Probes and version have no client errors.
+    - "#/paths/~1healthz/get/responses"
+    - "#/paths/~1readyz/get/responses"
+    - "#/paths/~1version/get/responses"
+  operation-2xx-response:
+    # WebSocket upgrade answers 101, not 2xx.
+    - "#/paths/~1ws/get/responses"

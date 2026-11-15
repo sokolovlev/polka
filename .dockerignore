@@ -1,0 +1,9 @@
+.git
+**/node_modules
+**/.next
+**/dist
+target
+bin
+.env
+.env.*
+!.env.example

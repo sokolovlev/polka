@@ -1,0 +1,27 @@
+# cargo-deny: license policy for Rust dependencies (R6: only free licenses).
+# Keep in sync with licenses.allow. Run: make licenses
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+# The list is shared across ecosystems; not every entry is used by Rust.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Our own crates are publish = false and MIT (workspace license).
+ignore = true

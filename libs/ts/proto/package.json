@@ -1,0 +1,25 @@
+{
+  "name": "@polka/proto",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Generated protobuf messages (ts-proto). Do not edit src/gen by hand: run `make gen`.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.17.0"
+  }
+}

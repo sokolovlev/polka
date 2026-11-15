@@ -1,0 +1,24 @@
+[package]
+name = "inventory"
+description = "Stock and reservations per SKU (spec 4.7)."
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "inventory"
+path = "src/main.rs"
+
+[dependencies]
+polka-proto.workspace = true
+polka-runtime.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+
+[dev-dependencies]
+tonic-health.workspace = true
+
+[lints]
+workspace = true

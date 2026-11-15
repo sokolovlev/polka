@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package polka.common.v1;
+
+// PageRequest is cursor pagination input (spec 6.1).
+message PageRequest {
+  // Maximum number of items to return, 1..100. 0 means the server default.
+  int32 page_size = 1;
+  // Opaque cursor from PageResponse.next_page_token; empty for the first page.
+  string page_token = 2;
+}
+
+// PageResponse is cursor pagination output.
+message PageResponse {
+  // Cursor for the next page; empty when there are no more items.
+  string next_page_token = 1;
+}

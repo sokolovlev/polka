@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package polka.common.v1;
+
+// Money is an amount in minor units (kopecks for RUB). Never a float.
+message Money {
+  // Amount in minor units, e.g. 129900 = 1299.00 RUB.
+  int64 amount_minor = 1;
+  // ISO 4217 code. Only "RUB" in the MVP.
+  string currency = 2;
+}

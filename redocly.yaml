@@ -1,0 +1,10 @@
+extends:
+  - recommended
+apis:
+  gateway:
+    root: services/gateway/api/openapi.yaml
+rules:
+  operation-4xx-response: error
+  security-defined: error
+  no-server-example.com: error
+  info-license-strict: error

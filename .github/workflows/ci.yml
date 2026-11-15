@@ -1,0 +1,274 @@
+# CI (spec 9.5): build and check only what changed, scan for secrets and
+# vulnerable images, publish images to GHCR from main.
+# Integration tests (testcontainers) and E2E in kind are added in the stages
+# that bring databases, Kafka and the saga.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Manual run on any branch (Actions tab → ci → Run workflow).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: "1.27.4"
+  NODE_VERSION: "22"
+  GOTOOLCHAIN: local
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      go: ${{ steps.diff.outputs.go }}
+      rust: ${{ steps.diff.outputs.rust }}
+      ts: ${{ steps.diff.outputs.ts }}
+      proto: ${{ steps.diff.outputs.proto }}
+      openapi: ${{ steps.diff.outputs.openapi }}
+      compose: ${{ steps.diff.outputs.compose }}
+      images: ${{ steps.diff.outputs.images }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: .github/scripts/changes.sh "$BASE"
+      - run: cat "$GITHUB_OUTPUT"
+
+  secrets:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: gitleaks
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          "$(go env GOPATH)/bin/gitleaks" git . --no-banner --redact -v
+
+  # R6: only free licenses (allow-list in licenses.allow).
+  licenses:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Cache license tools
+        uses: actions/cache@v5
+        with:
+          path: |
+            bin/go-licenses
+            bin/cargo-deny
+          key: license-tools-${{ runner.os }}-${{ hashFiles('Makefile') }}
+      - run: make licenses
+
+  proto:
+    needs: changes
+    if: needs.changes.outputs.proto == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: libs/go/go.sum
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Cache tools
+        uses: actions/cache@v5
+        with:
+          path: bin
+          key: tools-${{ runner.os }}-${{ hashFiles('Makefile', 'rust-toolchain.toml') }}
+      - name: Install tools
+        run: |
+          test -x bin/buf || make tools-go
+          test -x bin/protoc-gen-prost || make tools-rust
+          npm ci
+      - run: make proto-lint
+      - run: git fetch --no-tags origin main:refs/remotes/origin/main || true
+      - run: make proto-breaking
+      - run: make gen-check
+
+  go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          [
+            libs/go,
+            services/gateway,
+            services/auth,
+            services/catalog,
+            services/search,
+            services/order,
+          ]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+          cd ${{ matrix.module }} && "$(go env GOPATH)/bin/golangci-lint" run ./...
+      - name: go test -race
+        working-directory: ${{ matrix.module }}
+        run: go test -race -coverprofile=coverage.out ./...
+
+  rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      # rustup installs the toolchain pinned in rust-toolchain.toml.
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: make lint-rust
+      - run: make test-rust
+
+  ts:
+    needs: changes
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: make lint-ts
+      - run: make test-ts
+      - name: next build
+        run: npm run build -w @polka/web
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  openapi:
+    needs: changes
+    if: needs.changes.outputs.openapi == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - run: npm ci
+      - run: make openapi-lint
+      - name: oasdiff breaking
+        run: |
+          GOBIN="$PWD/bin" go install github.com/oasdiff/oasdiff@v1.37.0
+          git fetch --no-tags origin main:refs/remotes/origin/main || true
+          make openapi-breaking
+
+  compose:
+    needs: changes
+    if: needs.changes.outputs.compose == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: cp .env.example .env
+      - run: docker compose -f deploy/compose/compose.yaml --env-file .env --profile infra --profile apps config -q
+      - run: shellcheck deploy/compose/*.sh deploy/compose/init/*.sh .github/scripts/*.sh
+
+  images:
+    needs: changes
+    if: needs.changes.outputs.images != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.images) }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/polka-${{ matrix.service }}
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Pick Dockerfile
+        id: df
+        run: |
+          case "${{ matrix.service }}" in
+            gateway|auth|catalog|search|order) echo "file=services/go.Dockerfile" >>"$GITHUB_OUTPUT" ;;
+            inventory|payment|payment-provider-mock) echo "file=services/rust.Dockerfile" >>"$GITHUB_OUTPUT" ;;
+            notification) echo "file=services/node.Dockerfile" >>"$GITHUB_OUTPUT" ;;
+            web) echo "file=web/Dockerfile" >>"$GITHUB_OUTPUT" ;;
+            *) echo "unknown service" >&2; exit 1 ;;
+          esac
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.df.outputs.file }}
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            VERSION=${{ github.sha }}
+            COMMIT=${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          load: true
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+      - name: Image size
+        run: docker image inspect "$IMAGE:${{ github.sha }}" --format '{{.Size}}' | numfmt --to=si
+      - name: Trivy (HIGH, CRITICAL)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/" aquasec/trivy:0.76.1 \
+            image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL --no-progress \
+            "$IMAGE:${{ github.sha }}"
+      - name: Push to GHCR
+        if: env.PUSH == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ github.sha }}"
+          # :main is what `make up` pulls.
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:main"
+          docker push "$IMAGE:main"
+
+  # One required status check for branch protection, whatever ran.
+  ci-ok:
+    if: always()
+    needs: [changes, secrets, licenses, proto, go, rust, ts, openapi, compose, images]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: All jobs passed or were skipped
+        run: |
+          echo '${{ toJSON(needs) }}' | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")'

@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package polka.common.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+// Envelope wraps every Kafka message (spec 6.3). The Kafka message key is the
+// aggregate id, so all events of one order or product land in one partition.
+message Envelope {
+  // UUIDv7, the deduplication key for consumers (inbox).
+  string event_id = 1;
+  // Dotted event name, e.g. "order.created".
+  string event_type = 2;
+  string aggregate_id = 3;
+  int64 aggregate_version = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+  // Equals order_id for saga messages.
+  string correlation_id = 6;
+  // W3C Trace Context, so one trace spans the whole saga.
+  string traceparent = 7;
+  google.protobuf.Any payload = 8;
+}

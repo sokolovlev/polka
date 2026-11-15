@@ -1,0 +1,22 @@
+[package]
+name = "payment-provider-mock"
+description = "Fake acquiring provider for demos of failures and compensations (spec 4.9)."
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum.workspace = true
+polka-runtime.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true
